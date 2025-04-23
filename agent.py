@@ -7,11 +7,29 @@ logging.getLogger().setLevel(logging.INFO)
 
 class Agent:
     def __init__(self):
-        self.agent_emotion = EmotionTypes.IDLE
+        self.agent_emotion = None
+        self.agent_position = None
 
-    def get_emotion(self):
+    @property
+    def position(self):
+        return self.agent_position
+
+    @position.setter
+    def position(self, value):
+        self.agent_position = value
+
+    @property
+    def emotion(self):
+        if self.agent_emotion is None:
+            self.agent_emotion = EmotionTypes.IDLE
         return self.agent_emotion
 
+    @emotion.setter
+    def emotion(self, value):
+        self.agent_emotion = value
+
     def take_action(self, state, action_space):
-        logging.info(f"Agent emotion: {self.agent_emotion.name}")
+        # set agent position
+        self.position = state
+        logging.info(f"Agent emotion: {self.emotion.name}")
         return np.random.choice(action_space)
