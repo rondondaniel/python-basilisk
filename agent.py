@@ -13,9 +13,9 @@ from typing import Dict, Any, List
 logging.getLogger().setLevel(logging.INFO)
 
 class AgentBrain:
-    def __init__(self, current_position: tuple, current_emotion: EmotionTypes):
-        self._position = current_position
-        self._emotion = current_emotion
+    def __init__(self):
+        self.state = None
+        self.emotion = None
         
         # Initialize the LLM
         self._llm = OllamaLLM(
