@@ -14,45 +14,29 @@ def main():
     agent = Agent()
     
     # Initialize agent state from environment
-    agent.initialize_state_from_env(env)
-    env.render()
-    
-    # Get initial observation
-    observation = agent.observe(env)
-    logging.info(f"Initial observation: {observation}")
+    current_observation = env.reset()
     
     # Main loop
     done = False
-    steps = 0
-    max_steps = 20  # Limit the number of steps to avoid infinite loops
-    
-    while not done and steps < max_steps:
-        # Randomly choose a direction for this example
-        directions = ["left", "right", "up", "down", "stay"]
-        direction = random.choice(directions)
+    while not done:
         
-        # Take action with explicit environment passing
-        logging.info(f"Taking action: {direction}")
-        action_result = agent.take_action(direction, env)
-        logging.info(f"Result: {action_result}")
-        
-        # Check if done
-        done = "Done: True" in action_result
-        steps += 1
+        action = agent.take_action(current_observation)
+        new_observation, reward, done, info = env.step(action)
+        logger.info("Action: %s; Reward: %.4f" % (action, reward))
+        logger.info("Next State: %s" % new_observation)
+        logger.info("---------------------------------------------------------------")
         
         # Render environment
         env.render()
         
         # Get observation after action
-        observation = agent.observe(env)
-        logging.info(f"Observation: {observation}")
+        current_observation = new_observation
         
         # Optionally process a query with environment context
-        if steps % 5 == 0:  # Every 5 steps
-            response = agent.process_query("What should I do next?", env)
-            logging.info(f"Agent's suggestion: {response['output']}")
+        response = agent.process_query("What should I do next?", env)
+        logging.info(f"Agent's suggestion: {response['output']}")
     
-    logging.info(f"App finished after {steps} steps.")
+    logging.info(f"Episode finished.")
 
 if __name__ == "__main__":
     main()

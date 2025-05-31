@@ -46,32 +46,34 @@ class AgentBrain:
         
         # Initialize prompt template
         self._prompt_template = PromptTemplate.from_template(
-        """
-        You are an intelligent agent that can move in a 2D grid and express emotions.
-        
-        Available tools:
-        {tools}
-        
-        TO USE A TOOL, YOU MUST USE THIS EXACT FORMAT:
-        Thought: I need to use a tool to help answer the question.
-        Action: tool_name
-        Action Input: the input to the tool (may be empty for some tools)
-        
-        Example using the emotion_tool:
-        Thought: I want to check my current emotion.
-        Action: emotion_tool
-        Action Input: 
-        
-        Example using the move_tool:
-        Thought: I want to move up.
-        Action: move_tool
-        Action Input: {"direction": "up"}
-        
-        Question: {input}
-        {agent_scratchpad}
-        """
+            """
+            You are an intelligent agent that can move in a 2D grid and express emotions.
+            
+            Available tools:
+            {tools}
+            
+            TO USE A TOOL, YOU MUST USE THIS EXACT FORMAT:
+            Thought: I need to use a tool to help answer the question.
+            Action: tool_name
+            Action Input: the input to the tool (may be empty for some tools)
+            
+            Example using the emotion_tool:
+            Thought: I want to check my current emotion.
+            Action: emotion_tool
+            Action Input: 
+            
+            Example using the move_tool:
+            Thought: I want to move up.
+            Action: move_tool
+            Action Input: {"direction": "up"}
+            
+            Question: {input}
+            {agent_scratchpad}
+            """
         )
         
+        self.agent_executor = None
+
         # Initialize the agent executor
         self._initialize_agent()
     
@@ -88,44 +90,13 @@ class AgentBrain:
                 max_iterations=10
             )
             
-            self._agent_executor = agent_executor
+            self.agent_executor = agent_executor
             logging.info("Successfully initialized agent with ZERO_SHOT_REACT_DESCRIPTION")
             
         except Exception as e:
             logging.error(f"Failed to initialize agent: {str(e)}")
-            # Fall back to a more basic implementation
-            try:
-                # Import directly for the most up-to-date implementations
-                from langchain.agents import create_openai_functions_agent
-                from langchain.agents import AgentExecutor
-                from langchain.schema.runnable import RunnablePassthrough
-                from langchain.prompts import ChatPromptTemplate
-                
-                # Create a simple system prompt that doesn't rely on specific variables
-                system_message = (
-                    "You are an intelligent agent in a 2D grid world. "
-                    "You can observe your surroundings, move in different directions, "
-                    "and express different emotions. "
-                    "Use the available tools to help answer the user's questions."
-                )
-                
-                prompt = ChatPromptTemplate.from_messages([
-                    ("system", system_message),
-                    ("user", "{input}"),
-                    ("user", "Think through this step-by-step:"),
-                ])
-                
-                # Create a simple chain directly
-                chain = prompt | self._llm
-                self._agent_executor = {
-                    "input": lambda x: x,
-                    "output": lambda x: {"output": x}
-                }
-                logging.info("Fallback to simple LLM chain without tools")
-                
-            except Exception as e2:
-                logging.error(f"Failed second attempt to initialize agent: {str(e2)}")
-                raise e
+            # a "Fall back" could be implemented here
+
     
     def _emotion_tool(self, input_str: str = "") -> str:
         """Tool that returns the agent's current emotion or sets a new emotion
@@ -215,56 +186,7 @@ class AgentBrain:
             return f"Error processing move: {str(e)}"
             
     def _observe_tool(self, input_str: str = "", env=None) -> str:
-        """Tool that allows the agent to observe its environment
-        
-        Args:
-            input_str: Not used, but required by LangChain tool interface
-            env: Optional environment to observe
-            
-        Returns:
-            String describing what the agent observes in its environment
-        """
-        try:
-            if env is None:
-                return "No environment provided for observation."
-                
-            # Update state from the provided environment
-            self.state = env.state
-            self.position = env.agent_position
-            
-            # Create a description of what the agent sees
-            food_positions = np.argwhere(self.state == CellTypes.FOOD)
-            water_positions = np.argwhere(self.state == CellTypes.WATER)
-            
-            description = f"You are at position {self.position}. "
-            
-            # Describe food and water relative to agent position
-            if len(food_positions) > 0:
-                food_pos = tuple(food_positions[0])
-                food_direction = self._get_relative_direction(self.position, food_pos)
-                description += f"There is food {food_direction} at position {food_pos}. "
-            
-            if len(water_positions) > 0:
-                water_pos = tuple(water_positions[0])
-                water_direction = self._get_relative_direction(self.position, water_pos)
-                description += f"There is water {water_direction} at position {water_pos}. "
-            
-            # Describe boundaries
-            grid_size = self.state.shape[0]
-            if self.position[0] == 0:
-                description += "You are at the north edge. "
-            if self.position[0] == grid_size - 1:
-                description += "You are at the south edge. "
-            if self.position[1] == 0:
-                description += "You are at the west edge. "
-            if self.position[1] == grid_size - 1:
-                description += "You are at the east edge. "
-                
-            return description
-            
-        except Exception as e:
-            logging.error(f"Error in observe_tool: {str(e)}")
-            return f"Error observing environment: {str(e)}"
+        """Tool that gets observation to help the agent to observe its environment"""
     
     def _get_relative_direction(self, from_pos, to_pos):
         """Get relative direction from one position to another"""
@@ -355,12 +277,13 @@ class AgentBrain:
             
             # Create a more informative prompt with current state information
             enhanced_query = f"""Current situation:
-- {observation}
-- Your current emotion is: {self.emotion.name if self.emotion else 'Not set'}
+                - {observation}
+                - Your current emotion is: {self.emotion.name if self.emotion else 'Not set'}
 
-User query: {query}
+                User query: {query}
 
-Provide a helpful response:"""
+                Provide a helpful response:
+            """
             
             # Use the LLM directly 
             logging.info(f"Running LLM with query: {enhanced_query}")

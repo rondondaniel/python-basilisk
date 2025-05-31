@@ -22,37 +22,24 @@ class Agent:
     def state(self):
         return self.agent_brain.state
 
-    def initialize_state_from_env(self, env):
-        """Initialize the agent's state from an environment"""
-        self.agent_brain.init_state_from_env(env)
-        return self.agent_brain.state
-
-    def observe(self, env):
-        """Use the agent's observe tool to get a description of the environment
-        
-        Args:
-            env: The environment to observe
-        """
-        return self.agent_brain._observe_tool("", env)
-
-    def process_query(self, query, env=None):
+    def _process_query(self, query, observation: np.ndarray):
         """Process a query through the agent brain
         
         Args:
             query: The query to process
-            env: Optional environment to use for context
+            observation: The observation to act upon
         """
-        return self.agent_brain.run(query, env)
+        return self.agent_brain.run(query, observation)
 
-    def take_action(self, direction, env):
+    def take_action(self, observation):
         """Take a movement action
         
         Args:
-            direction: The direction to move in
-            env: The environment to act upon
+            observation: The observation to act upon
         """
-        direction_json = f'{{"direction": "{direction}"}}'  
-        return self.agent_brain._move_tool(direction_json, env)
+        response = self._process_query("What should I do next?", observation)
+        
+        return response['action']
 
     def set_emotion(self, emotion_name):
         """Set the agent's emotion"""
