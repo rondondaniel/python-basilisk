@@ -2,6 +2,7 @@
 Agent module that interfaces with AgentBrain
 """
 import logging
+import numpy as np
 from agent_brain import AgentBrain
 
 logging.getLogger().setLevel(logging.INFO)
@@ -42,6 +43,11 @@ class Agent:
         return response['action']
 
     def set_emotion(self, emotion_name):
-        """Set the agent's emotion"""
-        emotion_json = f'{{"emotion": "{emotion_name}"}}'  
-        return self.agent_brain._emotion_tool(emotion_json)
+        """Set the agent's emotion
+        
+        Args:
+            emotion_name: The name of the emotion to set (idle, hungry, thirsty)
+        """
+        # Use the tool directly from AgentBrain
+        result = self.agent_brain.tools[1](emotion_name)
+        return result
