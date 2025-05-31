@@ -7,16 +7,15 @@ import json
 from models import ActionTypes, EmotionTypes, CellTypes
 from langchain.prompts import PromptTemplate
 from langchain.tools import Tool
-from langchain.agents import initialize_agent, AgentType
 from langchain_ollama import OllamaLLM
-from typing import Dict, Any
-from env import BoardEnv
+from typing import Dict, Any, List
 
 class AgentBrain:
     def __init__(self):
-        self.state = None
-        self.emotion = None
-        self.position = None  # Store agent position
+        self._emotion = None
+        self._emotions_memory: List[str] = []
+        self._position = None  # Store agent position
+        self._current_observation = None
         
         # Initialize the LLM
         self._llm = OllamaLLM(
@@ -38,9 +37,9 @@ class AgentBrain:
                 description="Moves the agent in a specified direction. Input: {\"direction\": \"left|right|up|down|stay\"}"
             ),
             Tool(
-                name="observe_tool",
-                func=self._observe_tool,
-                description="Observes the environment around the agent. No input required."
+                name="describe_observation_tool",
+                func=self._describe_observation_tool,
+                description="Observes the environment around the agent. Input: {\"observation\": \"observation\"}"
             ),
         ]
         
@@ -74,30 +73,6 @@ class AgentBrain:
         
         self.agent_executor = None
 
-        # Initialize the agent executor
-        self._initialize_agent()
-    
-    def _initialize_agent(self) -> None:
-        """Initialize or reinitialize the agent executor with current settings"""
-        try:
-            # Use ZERO_SHOT_REACT_DESCRIPTION which is more compatible with multiple tools
-            agent_executor = initialize_agent(
-                tools=self._tools_list,
-                llm=self._llm,
-                agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-                verbose=True,
-                handle_tool_error=True,
-                max_iterations=10
-            )
-            
-            self.agent_executor = agent_executor
-            logging.info("Successfully initialized agent with ZERO_SHOT_REACT_DESCRIPTION")
-            
-        except Exception as e:
-            logging.error(f"Failed to initialize agent: {str(e)}")
-            # a "Fall back" could be implemented here
-
-    
     def _emotion_tool(self, input_str: str = "") -> str:
         """Tool that returns the agent's current emotion or sets a new emotion
         
@@ -136,7 +111,7 @@ class AgentBrain:
             logging.error(f"Error in emotion_tool: {str(e)}")
             return f"Error handling emotion: {str(e)}"
 
-    def _move_tool(self, input_str: str, env=None) -> str:
+    def _move_tool(self, input_str: str) -> str:
         """Tool that determines the agent's move decision based on ActionTypes
         
         Args:
@@ -185,8 +160,13 @@ class AgentBrain:
             logging.error(f"Error in move_tool: {str(e)}")
             return f"Error processing move: {str(e)}"
             
-    def _observe_tool(self, input_str: str = "", env=None) -> str:
-        """Tool that gets observation to help the agent to observe its environment"""
+    def _describe_observation_tool(self) -> str:
+        """Tool that describes observation to help the agent to observe its environment"""
+        try:
+            return self._get_state_description()
+        except Exception as e:
+            logging.error(f"Error in describe_observation_tool: {str(e)}")
+            return f"Error processing describe observation: {str(e)}"
     
     def _get_relative_direction(self, from_pos, to_pos):
         """Get relative direction from one position to another"""
@@ -208,21 +188,10 @@ class AgentBrain:
             return "at your current position"
         
         return " and ".join(directions)
-
-    def init_state_from_env(self, env: BoardEnv) -> None:
-        """Initialize agent state from an environment
-        
-        Args:
-            env: BoardEnv instance to initialize state from
-        """
-        # Get state from environment without storing the environment itself
-        self.state = env.reset()
-        self.position = env.agent_position
-        logging.info(f"Agent state initialized from environment. Position: {self.position}")
     
     def _get_state_description(self) -> str:
         """Get a description of the current state without needing an environment"""
-        if self.state is None or self.position is None:
+        if self._state is None or self._position is None:
             return "No state information available."
         
         # Create a description based on the stored state
@@ -255,29 +224,31 @@ class AgentBrain:
             
         return description
 
-    def run(self, query: str, env: Optional[BoardEnv] = None) -> Dict[str, Any]:
+    def _update_emotion_based_on_previous_emotions(self, emotions_memory: List[str]) -> None:
+        """Update the agent's emotion based on previous emotions
+        
+        Args:
+            emotions_memory: List of previous emotions
+        """
+        pass
+        
+    
+    def run(self, query: str, observation: np.ndarray) -> Dict[str, Any]:
         """Run the agent with the given query
         
         Args:
             query: The user's input query or instruction for the agent
-            env: Optional environment to use for the interaction
+            observation: The observation to act upon
             
         Returns:
             Dictionary containing the agent's response and any additional info
         """
-        try:
-            # Get observation from the provided environment
-            if env is not None:
-                # Update state from environment
-                self.state = env.state
-                self.position = env.agent_position
-                observation = self._observe_tool("", env)
-            else:
-                observation = "No environment provided for observation." if self.state is None else self._get_state_description()
-            
+        self.current_observation = observation
+
+        try:        
             # Create a more informative prompt with current state information
             enhanced_query = f"""Current situation:
-                - {observation}
+                - {self.current_observation}
                 - Your current emotion is: {self.emotion.name if self.emotion else 'Not set'}
 
                 User query: {query}
@@ -286,63 +257,15 @@ class AgentBrain:
             """
             
             # Use the LLM directly 
-            logging.info(f"Running LLM with query: {enhanced_query}")
+            logging.info(f"Invoking LangChain AgentExecutor: {enhanced_query}")
             
             # Get direct response from LLM
-            response = self._llm.invoke(enhanced_query)
-            
-            # Update emotion based on the current state if environment is provided
-            if env is not None:
-                self._update_emotion_based_on_state(env)
+            response = self.agent_executor.invoke(enhanced_query)
             
             return {
-                "output": response,
-                "position": self.position,
-                "emotion": self.emotion.name if self.emotion else None,
-                "observation": observation,
-                "state": self.state.tolist() if self.state is not None else None
+                "action": response,
+                "emotion": self._emotion.name if self.emotion else EmotionTypes.IDLE.name,
             }
         except Exception as e:
             logging.error(f"Error running agent: {str(e)}")
-            return {"error": str(e), "output": "An error occurred while processing your request."}
-    
-    def _update_emotion_based_on_state(self, env=None) -> None:
-        """Update the agent's emotion based on the current environment state
-        
-        Args:
-            env: Optional environment to use for updating emotion
-        """
-        # Use the provided environment or fall back to current state
-        state = self.state
-        position = self.position
-        
-        if env is not None:
-            state = env.state
-            position = env.agent_position
-            
-        if state is None or position is None:
-            return
-            
-        # Get positions of food and water
-        food_positions = np.argwhere(state == CellTypes.FOOD)
-        water_positions = np.argwhere(state == CellTypes.WATER)
-        
-        # Calculate distances to food and water
-        food_distance = float('inf')
-        water_distance = float('inf')
-        
-        if len(food_positions) > 0:
-            food_pos = tuple(food_positions[0])
-            food_distance = abs(food_pos[0] - position[0]) + abs(food_pos[1] - position[1])
-            
-        if len(water_positions) > 0:
-            water_pos = tuple(water_positions[0])
-            water_distance = abs(water_pos[0] - position[0]) + abs(water_pos[1] - position[1])
-        
-        # Set emotion based on distances
-        if food_distance <= water_distance and food_distance < 3:
-            self.emotion = EmotionTypes.HUNGRY
-        elif water_distance < food_distance and water_distance < 3:
-            self.emotion = EmotionTypes.THIRSTY
-        else:
-            self.emotion = EmotionTypes.IDLE
+            return {"action": "An error occurred while processing your request."}
