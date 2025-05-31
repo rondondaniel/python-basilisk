@@ -5,25 +5,15 @@ Using LangGraph to implement a ReAct agent pattern
 import numpy as np
 import logging
 import json
-from models import ActionTypes, EmotionTypes, CellTypes
-from typing import Dict, Any, List, Tuple, Annotated, TypedDict, Literal, Union, Optional
-import operator
-from enum import Enum
+from models import ActionTypes, EmotionTypes, CellTypes, AgentState
+from typing import Dict, Any, List, Optional, Literal
+from langchain_core.messages import HumanMessage, AIMessage
 
 # LangGraph imports
-from langgraph.prebuilt import create_react_agent
-from langchain_core.messages import HumanMessage, AIMessage
+from langgraph.graph import StateGraph, END
 from langchain_core.tools import tool, BaseTool
 from langchain_ollama import OllamaLLM
 
-# Define state schema for the LangGraph
-class AgentState(TypedDict):
-    messages: List[Union[HumanMessage, AIMessage]]
-    observation: np.ndarray
-    position: Optional[Tuple[int, int]]
-    emotion: Optional[str]
-    action: Optional[int]
-    error: Optional[str]
 
 class AgentBrain:
     def __init__(self):
@@ -38,17 +28,35 @@ class AgentBrain:
             base_url="http://127.0.0.1:11434",  # Ollama server URL
             temperature=0.7
         )
-
-        self.tools = self._setup_tools()
-
-        self._agent_executor = create_react_agent(
-            model=self._llm,
-            tools=self.tools,
-            response_format=AgentState,
-        )
+        
+        # Initialize tools using the LangGraph tool decorator
+        self._setup_tools()
+        
+        # Initialize the LangGraph
+        self._setup_langgraph()
+    
+    @property
+    def emotion(self):
+        """Get the agent's current emotion"""
+        return self._emotion
+    
+    @property
+    def position(self):
+        """Get the agent's current position"""
+        return self._position
+        
+    @property
+    def current_observation(self):
+        """Get the agent's current observation"""
+        return self._current_observation
+        
+    @current_observation.setter
+    def current_observation(self, observation):
+        """Set the agent's current observation"""
+        self._current_observation = observation
 
     def _setup_tools(self):
-        """Set up the tools for the agent"""
+        """Set up the tools for the LangGraph agent"""
         
         @tool
         def get_emotion() -> str:
@@ -95,9 +103,17 @@ class AgentBrain:
             return self._get_state_description()
                 
         # Store tools for LangGraph
-        tools = [get_emotion, set_emotion, get_direction, describe_observation]
-
-        return tools
+        self.tools = [get_emotion, set_emotion, get_direction, describe_observation]
+        
+        # Create BaseTool objects directly for LangGraph
+        self.langchain_tools = []
+        for t in self.tools:
+            if hasattr(t, '_tool_config'):
+                self.langchain_tools.append(BaseTool(
+                    name=t._tool_config['name'] or t.__name__,
+                    description=t._tool_config['description'],
+                    func=t
+                ))
 
     def _emotion_tool(self, input_str: str = "") -> str:
         """Tool that returns the agent's current emotion or sets a new emotion
@@ -249,14 +265,218 @@ class AgentBrain:
                 self._emotion = EmotionTypes.IDLE
         
     
-    def _extract_action_from_message(self, message_content: str) -> Optional[int]:
+    def _setup_langgraph(self):
+        """Set up the LangGraph for the ReAct agent"""
+        # Create a new graph
+        builder = StateGraph(AgentState)
+        
+        # Define nodes
+        
+        # 1. LLM agent node
+        def agent(state: AgentState) -> AgentState:
+            """Agent node that processes the messages and decides next steps"""
+            # Prepare prompt with current state information
+            messages = state["messages"]
+            
+            # Add environment info to the messages
+            if self._current_observation is not None:
+                observation_desc = self._get_state_description()
+                emotion_desc = f"Current emotion: {self._emotion.name if self._emotion else 'None'}"
+                
+                # Check for resources in observation to add emoji indicators
+                has_food = "food" in observation_desc.lower()
+                has_water = "water" in observation_desc.lower()
+                
+                # Build message with resource indicators
+                resource_indicators = ""
+                if has_food:
+                    resource_indicators += "🍎 Food detected! "
+                if has_water:
+                    resource_indicators += "💧 Water detected! "
+                
+                env_message = f"Environment observation: {observation_desc}\n{resource_indicators}\nEmotion: {emotion_desc}\n\nThink step by step about your situation and plan your next move carefully."
+                
+                # Add environment info as a system message if not already present
+                if not any("Environment observation:" in str(m.content) for m in messages if hasattr(m, 'content')):
+                    messages.append(HumanMessage(content=env_message))
+            
+            # Invoke LLM directly without binding tools
+            # For Ollama LLM, we'll use a simpler approach for tools
+            # Form a prompt with the messages and tool descriptions
+            prompt = "\n".join([m.content for m in messages if hasattr(m, 'content')])
+            prompt += "\n\nYou have the following tools available:\n"
+            for tool in self.langchain_tools:
+                prompt += f"- {tool.name}: {tool.description}\n"
+            prompt += "\nTo use a tool, respond with: [TOOL] tool_name(parameters) [/TOOL]\n"
+            
+            # Invoke LLM with the prompt using streaming
+            response_chunks = []
+            try:
+                import time
+                import sys
+                
+                print("\n\033[1m🤔 Agent thinking...\033[0m")
+                print("\033[90m", end="")  # Gray color for thinking
+                
+                # Stream response chunks
+                for chunk in self._llm.stream(prompt):
+                    # Print each chunk as it comes in
+                    chunk_text = str(chunk)
+                    sys.stdout.write(chunk_text)
+                    sys.stdout.flush()
+                    response_chunks.append(chunk_text)
+                    # Small delay for readability (adjust as needed)
+                    time.sleep(0.001)
+                    
+                print("\033[0m")  # Reset color
+                
+                # Combine chunks into full response
+                llm_response = ''.join(response_chunks)
+                
+                # Extract decision from response for a summary
+                action = self._extract_action_from_message(llm_response)
+                action_name = action.name if action else "UNKNOWN"
+                
+                # Create a decision summary with color highlighting
+                print("\033[1m🤖 Decision Summary:\033[0m")
+                print(f"\033[96m➡️ Direction: {action_name}\033[0m")
+                
+                # Extract key phrases for decision reasoning (simplified)
+                reasoning = ""
+                if "because" in llm_response.lower():
+                    reasoning = llm_response.lower().split("because")[1].split(".")[0]
+                    print(f"\033[96m🧠 Reasoning: because{reasoning}\033[0m")
+                
+                # Log the response for debugging
+                logging.debug(f"LLM Full Response: {llm_response}")
+            except Exception as e:
+                # Fallback if streaming not supported
+                logging.info(f"Streaming error: {str(e)}. Using regular invoke.")
+                llm_response = self._llm.invoke(prompt)
+            
+            # Create AI message from response
+            result = AIMessage(content=llm_response)
+            
+            # Check if the response contains tool calls
+            if "[TOOL]" in llm_response and "[/TOOL]" in llm_response:
+                # Extract tool calls
+                start_idx = llm_response.find("[TOOL]")
+                end_idx = llm_response.find("[/TOOL]", start_idx)
+                tool_call_text = llm_response[start_idx+6:end_idx].strip()
+                
+                # Parse tool call format: tool_name(parameters)
+                if "(" in tool_call_text and ")" in tool_call_text:
+                    tool_name = tool_call_text.split("(")[0].strip()
+                    tool_args_str = tool_call_text.split("(")[1].split(")")[0].strip()
+                    
+                    # Print highlighted tool call
+                    print(f"\033[93m⚡ TOOL CALL: {tool_name}({tool_args_str})\033[0m")
+                    
+                    # Add tool_calls to the message for our graph to process
+                    # We're using a custom format that our use_tools node will understand
+                    result.tool_calls = [{"name": tool_name, "args": {"input": tool_args_str}}]
+            
+            # Update messages
+            messages.append(result)
+            return {"messages": messages}
+        
+        # 2. Use tools node - for handling tool calls from the agent
+        def use_tools(state: AgentState) -> AgentState:
+            """Process any tool calls from the last message"""
+            messages = state["messages"]
+            last_message = messages[-1]
+            
+            # Check if there are tool calls
+            if not hasattr(last_message, 'tool_calls') or not last_message.tool_calls:
+                return state
+                
+            # Process each tool call
+            tool_results = []
+            for tool_call in last_message.tool_calls:
+                tool_name = tool_call.get('name')
+                tool_args = tool_call.get('args', {})
+                
+                # Find matching tool
+                for tool_fn in self.tools:
+                    if hasattr(tool_fn, '_tool_config') and tool_fn._tool_config.get('name') == tool_name:
+                        # Execute tool
+                        try:
+                            input_value = tool_args.get('input', '')
+                            result = tool_fn(input_value) if input_value else tool_fn()
+                            tool_result = f"Tool '{tool_name}' result: {str(result)}"
+                            
+                            # Print tool result with nice formatting
+                            print(f"\033[38;5;35m💡 TOOL RESULT: '{tool_name}' → {str(result)}\033[0m")
+                            
+                            tool_results.append(AIMessage(content=tool_result))
+                        except Exception as e:
+                            error_msg = f"Error executing tool '{tool_name}': {str(e)}"
+                            tool_results.append(AIMessage(content=error_msg))
+            
+            # Add tool results to messages
+            messages.extend(tool_results)
+            return {"messages": messages}
+        
+        # 3. Emotion update node 
+        def update_emotion(state: AgentState) -> AgentState:
+            """Update the agent's emotion based on previous emotions"""
+            if self._emotions_memory:
+                self._update_emotion_based_on_previous_emotions(self._emotions_memory)
+                
+            return {"emotion": self._emotion.name if self._emotion else None}
+        
+        # 4. Action extraction node
+        def extract_action(state: AgentState) -> Dict:
+            """Extract an action from messages"""
+            messages = state["messages"]
+            
+            # Look for action in the last AI message
+            for i in range(len(messages) - 1, -1, -1):
+                if isinstance(messages[i], AIMessage):
+                    action = self._extract_action_from_message(messages[i].content)
+                    if action is not None:
+                        return {"action": action.value}
+                        
+            # Default to STAY if no action found
+            return {"action": ActionTypes.STAY.value}
+            
+        # Add nodes to the graph
+        builder.add_node("agent", agent)
+        builder.add_node("use_tools", use_tools)
+        builder.add_node("update_emotion", update_emotion)
+        builder.add_node("extract_action", extract_action) 
+        
+        # Define edges
+        
+        # Start with the agent
+        builder.set_entry_point("agent")
+        
+        # Agent -> use_tools if tool call exists, otherwise -> update_emotion
+        builder.add_conditional_edges(
+            "agent",
+            lambda state: "use_tools" if state["messages"] and hasattr(state["messages"][-1], 'tool_calls') and state["messages"][-1].tool_calls else "update_emotion"
+        )
+        
+        # use_tools -> agent to continue reasoning
+        builder.add_edge("use_tools", "agent")
+        
+        # Update emotion -> extract action
+        builder.add_edge("update_emotion", "extract_action")
+        
+        # Extract action -> END
+        builder.add_edge("extract_action", END)
+        
+        # Compile the graph
+        self.graph = builder.compile()
+        
+    def _extract_action_from_message(self, message_content: str) -> Optional[ActionTypes]:
         """Extract an action from the agent's message
         
         Args:
             message_content: The content of the agent's message
             
         Returns:
-            The action value (int) from ActionTypes, or None if no action found
+            The action value (ActionTypes), or None if no action found
         """
         # Look for directional keywords in the message
         message = message_content.lower()
@@ -286,29 +506,39 @@ class AgentBrain:
         Returns:
             Dictionary containing the agent's response and any additional info
         """
-        self.current_observation = observation
-
-        try:        
-            # Create a more informative prompt with current state information
-            enhanced_query = f"""Current situation:
-                - {self.current_observation}
-                - Your current emotion is: {self.emotion.name if self.emotion else 'Not set'}
-
-                User query: {query}
-
-                Provide a helpful response:
-            """
+        try:
+            # Update current observation and position
+            self._current_observation = observation
+            # Position would typically come from the environment
+            # We'll assume it's in the center of any agent cell for now
+            agent_pos = np.where(observation == CellTypes.AGENT)
+            if len(agent_pos[0]) > 0:
+                self._position = (agent_pos[0][0], agent_pos[1][0])
             
-            # Use the LLM directly 
-            logging.info(f"Invoking LangChain AgentExecutor: {enhanced_query}")
+            # Initialize state
+            initial_state = {
+                "messages": [HumanMessage(content=query)],
+                "observation": observation,
+                "position": self._position,
+                "emotion": self._emotion.name if self._emotion else None,
+                "action": None,
+                "error": None
+            }
             
-            # Get direct response from LLM
-            response = self._agent_executor.invoke(enhanced_query)
+            # Run the graph
+            final_state = self.graph.invoke(initial_state)
             
+            # Return the final state
             return {
-                "action": response,
-                "emotion": self._emotion.name if self.emotion else EmotionTypes.IDLE.name,
+                "action": final_state.get("action", ActionTypes.STAY.value),
+                "emotion": final_state.get("emotion", EmotionTypes.IDLE.name),
+                "messages": final_state.get("messages", []),
+                "output": final_state["messages"][-1].content if final_state.get("messages") else ""
             }
         except Exception as e:
-            logging.error(f"Error running agent: {str(e)}")
-            return {"action": "An error occurred while processing your request."}
+            logging.error(f"Error running agent with LangGraph: {str(e)}")
+            return {
+                "action": ActionTypes.STAY.value, 
+                "error": str(e),
+                "output": "An error occurred while processing your request."
+            }
